@@ -1,18 +1,36 @@
-use rusb::{Context, DeviceHandle, Error, UsbContext, TransferType, Direction};
+use rusb::{Context, Error, UsbContext, TransferType, Direction};
 use std::time::Duration;
+use std::thread;
+use std::sync::Arc;
 
 fn foo() -> rusb::Result<()> {
-  let vendor_id = 0x17ef;
-  let product_id = 0x608d;
+  let device_ids = "17ef:608d"; // mouse
+  // let device_ids = "090c:1000"; // usb drive
+  // let device_ids = "046d:0a44"; // headset
+
+  let mut ids = device_ids.split(":");
+
+  let Some(vendor_id) = ids.next() else {
+    return Err(Error::Other);
+  }; //0x17ef;
+  println!("vendor_id is {}", vendor_id);
+  let v_id = u16::from_str_radix(vendor_id, 16).unwrap();
+
+  let Some(product_id) = ids.next() else {
+    return Err(Error::Other);
+  }; //0x608d;
+  let p_id = u16::from_str_radix(product_id, 16).unwrap();
 
   let context = Context::new()?;
   let devices = context.devices()?;
+
+  let mut threads = Vec::new();
 
   for device in devices.iter() {
     println!("looping...");
     let device_desc = device.device_descriptor().unwrap();
 
-    if device_desc.vendor_id() != vendor_id || device_desc.product_id() != product_id {
+    if device_desc.vendor_id() != v_id || device_desc.product_id() != p_id {
       continue;
     }
 
@@ -25,21 +43,21 @@ fn foo() -> rusb::Result<()> {
       device.speed(),
     );
 
-    let mut handle = device.open()?;
+    let handle = Arc::new(device.open()?);
     println!("got the handle");
 
-    // Often HID devices have interface #0 for the basic mouse/keyboard reports
-    // If the kernel driver is attached (common on Linux), detach it first
-    // (Windows does not require this call, and on macOS you also won't do this)
     handle.set_auto_detach_kernel_driver(true)?;
+
     let config_desc = device.active_config_descriptor()?;
+  
     for interface in config_desc.interfaces() {
       for interface_desc in interface.descriptors() {
+        let cloned_handle = Arc::clone(&handle);
         let interface_number = interface_desc.interface_number();
 
         // Claim the interface. If the kernel is using it, auto-detach
         // above should handle that. If not, you may need handle.detach_kernel_driver(interface_number) explicitly.
-        match handle.claim_interface(interface_number) {
+        match cloned_handle.claim_interface(interface_number) {
           Ok(_) => println!("Claimed interface {}", interface_number),
           Err(e) => {
             eprintln!("Could not claim interface {}: {:?}", interface_number, e);
@@ -49,30 +67,90 @@ fn foo() -> rusb::Result<()> {
 
         // Look for an interrupt IN endpoint.
         for endpoint_desc in interface_desc.endpoint_descriptors() {
-          if endpoint_desc.transfer_type() == TransferType::Interrupt
-            && endpoint_desc.direction() == Direction::In
-          {
-            let endpoint_address = endpoint_desc.address();
-            println!(
-              "Found interrupt IN endpoint: 0x{:02x} on interface {}",
-              endpoint_address, interface_number
-            );
+          if endpoint_desc.transfer_type() == TransferType::Interrupt {
+            if endpoint_desc.direction() == Direction::In {
+              let endpoint_address = endpoint_desc.address();
+              println!(
+                "Found interrupt IN endpoint: 0x{:02x} on interface {}",
+                endpoint_address, interface_number
+              );
+                
+              // determine packet size for this endpoint
+              let packet_size = endpoint_desc.max_packet_size() as usize;
+              let mut buf = vec![0u8; packet_size];
 
-            // Simple read loop
-            let mut buf = [0u8; 8]; // size depends on your device
-            loop {
-              match handle.read_interrupt(endpoint_address, &mut buf, Duration::from_millis(500)) {
-                Ok(len) => {
-                  println!("Read {} bytes: {:?}", len, &buf[..len]);
+              let cloned_handle = Arc::clone(&handle);
+              let t = thread::spawn(move || {
+                // read loop
+                loop {
+                  match cloned_handle.read_interrupt(endpoint_address, &mut buf, Duration::from_secs(60)) {
+                    Ok(len) => {
+                      println!("Read {} bytes: {:?}", len, &buf[..len]);
+                    }
+                    Err(e) => {
+                      // Timeout or other error
+                      eprintln!("read_interrupt error: {:?}", e);
+                      // Decide whether to break or continue
+                      // break;
+                    }
+                  }
                 }
-                Err(e) => {
-                  // Timeout or other error
-                  eprintln!("read_interrupt error: {:?}", e);
-                  // Decide whether to break or continue
-                  // break;
-                }
-              }
+              });
+              threads.push(t);
+
+            } else {
+              unimplemented!();
             }
+            
+          } else if endpoint_desc.transfer_type() == TransferType::Bulk {
+            if endpoint_desc.direction() == Direction::In {
+              let endpoint_address = endpoint_desc.address();
+              println!(
+                "Found bulk IN endpoint: 0x{:02x} on interface {}",
+                endpoint_address, interface_number
+              );
+
+              let packet_size = endpoint_desc.max_packet_size() as usize;
+              let mut buf = vec![0u8; packet_size];
+
+              // TODO: we should probably start a thread here
+              let cloned_handle = Arc::clone(&handle);
+              let t = thread::spawn(move || {
+                loop {
+                  match cloned_handle.read_bulk(endpoint_address, &mut buf, Duration::from_secs(5)) {
+                    Ok(len) => {
+                      println!("Read {} bytes: {:?}", len, &buf[..len]);
+                    }
+                    Err(e) => {
+                      eprintln!("read_bulk error: {:?}", e)
+                    }
+                  }
+                }
+              });
+              threads.push(t);
+
+            } else {
+              unimplemented!();
+            }
+
+          } else if endpoint_desc.transfer_type() == TransferType::Isochronous {
+            if endpoint_desc.direction() == Direction::In {
+              let endpoint_address = endpoint_desc.address();
+              println!(
+                "Found isochronous IN endpoint: 0x{:02x} on interface {}",
+                endpoint_address, interface_number
+              );
+              unimplemented!();
+
+            } else {
+              unimplemented!();
+            }
+
+          } else if endpoint_desc.transfer_type() == TransferType::Control {
+            unimplemented!();
+
+          } else {
+            unimplemented!();
           }
         }
 
@@ -84,6 +162,10 @@ fn foo() -> rusb::Result<()> {
         break;
       }
     }
+  }
+
+  for t in threads {
+    t.join().unwrap();
   }
   Ok(())
 }
