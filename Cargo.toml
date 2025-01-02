@@ -1,0 +1,8 @@
+[package]
+name = "usb_tee"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+proxy = { path = "./proxy" }
+lazy_static = "1.4"
