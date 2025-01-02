@@ -1,7 +1,7 @@
 use rusb::{Context, Error, UsbContext, TransferType, Direction};
 use std::time::Duration;
 use std::thread;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::pipe::Pipe;
 
@@ -17,7 +17,9 @@ impl Reader {
       }
   }
 
-  pub fn read(&self, pipe: &'static Pipe) -> rusb::Result<()> {
+  pub fn read<F>(&self, mut writer_cb: F) -> rusb::Result<()>
+  where
+      F: FnMut(&mut [u8]) -> () {
     let device_ids = "17ef:608d"; // mouse
                                   // let device_ids = "090c:1000"; // usb drive
                                   // let device_ids = "046d:0a44"; // headset
@@ -39,7 +41,7 @@ impl Reader {
     let devices = context.devices()?;
 
     let mut threads = Vec::new();
-    let pipe = Arc::new(pipe);
+    // let pipe = Arc::new(Mutex::new(pipe));
     for device in devices.iter() {
       println!("looping...");
       let device_desc = device.device_descriptor().unwrap();
@@ -95,29 +97,47 @@ impl Reader {
                 let mut buf = vec![0u8; packet_size];
 
                 let cloned_handle = Arc::clone(&handle);
-                let pipe = Arc::clone(&pipe);
-                let t = thread::spawn(move || {
-                  // read loop
-                  loop {
-                    match cloned_handle.read_interrupt(
-                      endpoint_address,
-                      &mut buf,
-                      Duration::from_secs(60),
-                    ) {
-                      Ok(len) => {
-                        // println!("Read {} bytes: {:?}", len, &buf[..len]);
-                        pipe.write(&mut buf);
-                      }
-                      Err(e) => {
-                        // Timeout or other error
-                        eprintln!("read_interrupt error: {:?}", e);
-                        // Decide whether to break or continue
-                        // break;
-                      }
-                    }
-                  }
-                });
-                threads.push(t);
+                // let pipe = Arc::clone(&pipe);
+                // let t = thread::spawn(move || {
+                //   // read loop
+                //   loop {
+                //     match cloned_handle.read_interrupt(
+                //       endpoint_address,
+                //       &mut buf,
+                //       Duration::from_secs(60),
+                //     ) {
+                //       Ok(len) => {
+                //         // println!("Read {} bytes: {:?}", len, &buf[..len]);
+                //         pipe.write(&mut buf);
+                //       }
+                //       Err(e) => {
+                //         // Timeout or other error
+                //         eprintln!("read_interrupt error: {:?}", e);
+                //         // Decide whether to break or continue
+                //         // break;
+                //       }
+                //     }
+                //   }
+                // });
+                // threads.push(t);
+                loop {  //TODO: threadify
+                  match cloned_handle.read_interrupt(
+                          endpoint_address,
+                          &mut buf,
+                          Duration::from_secs(60),
+                        ) {
+                          Ok(len) => {
+                            // println!("Read {} bytes: {:?}", len, &buf[..len]);
+                            writer_cb(&mut buf);
+                          }
+                          Err(e) => {
+                            // Timeout or other error
+                            eprintln!("read_interrupt error: {:?}", e);
+                            // Decide whether to break or continue
+                            // break;
+                          }
+                        }
+                }
               } else {
                 unimplemented!();
               }
